@@ -4,6 +4,7 @@ import SwiftUI
 
 struct MenuBarContentView: View {
   @ObservedObject var store: UsageStore
+  let makeActive: (AuthUsageRow) -> Void
   let showSettings: () -> Void
 
   var body: some View {
@@ -17,7 +18,7 @@ struct MenuBarContentView: View {
       } else {
         ForEach(Array(store.rows.enumerated()), id: \.element.id) { _, row in
           Divider()
-          UsageRowView(row: row)
+          UsageRowView(row: row, makeActive: makeActive)
         }
       }
 
@@ -98,17 +99,26 @@ private struct LastRefreshedText: View {
 
 private struct UsageRowView: View {
   let row: AuthUsageRow
+  let makeActive: (AuthUsageRow) -> Void
 
   var body: some View {
     let usage = row.usage ?? UsageValues()
 
     VStack(alignment: .leading, spacing: 2) {
-      HStack(spacing: 6) {
-        StatusIcon(status: usage.availabilityStatus)
+      HStack(alignment: .firstTextBaseline, spacing: 8) {
+        HStack(spacing: 6) {
+          StatusIcon(status: usage.availabilityStatus)
 
-        Text(row.displayName)
-          .font(.system(size: 14, weight: .semibold))
-          .lineLimit(1)
+          Text(row.displayName)
+            .font(.system(size: 14, weight: .semibold))
+            .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+
+        Button("Make active") {
+          makeActive(row)
+        }
+        .font(.system(size: 12))
       }
 
       UsageDetailLines(usage: usage)

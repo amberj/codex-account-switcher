@@ -36,6 +36,7 @@ public final class UsageStore: ObservableObject {
 
   public let defaultAuthFile: URL
   private let scanner: AuthFolderScanner
+  private let authSwitcher: AuthSwitcher
   private let client: CodexAppServerClient
   private let defaults: UserDefaults
   private let startOnLoginHandler: @MainActor (Bool) -> Void
@@ -44,6 +45,7 @@ public final class UsageStore: ObservableObject {
 
   public init(
     scanner: AuthFolderScanner = AuthFolderScanner(),
+    authSwitcher: AuthSwitcher = AuthSwitcher(),
     client: CodexAppServerClient = CodexAppServerClient(),
     defaults: UserDefaults = .standard,
     defaultAuthFile: URL = FileManager.default.homeDirectoryForCurrentUser
@@ -51,6 +53,7 @@ public final class UsageStore: ObservableObject {
     startOnLoginHandler: @escaping @MainActor (Bool) -> Void = { _ in }
   ) {
     self.scanner = scanner
+    self.authSwitcher = authSwitcher
     self.client = client
     self.defaults = defaults
     self.defaultAuthFile = defaultAuthFile
@@ -82,6 +85,13 @@ public final class UsageStore: ObservableObject {
 
   public func refreshUsageStatus() {
     startRefresh(disablesRefreshButtonDuringFolderCheck: false)
+  }
+
+  public func makeActive(_ row: AuthUsageRow) throws -> AuthSwitchResult {
+    let result = try authSwitcher.switchAuth(currentAuthFile: defaultAuthFile, chosenAuthFile: row.authFile)
+    updateDefaultAuthStatus()
+    refreshUsageStatus()
+    return result
   }
 
   private func startRefresh(disablesRefreshButtonDuringFolderCheck: Bool) {

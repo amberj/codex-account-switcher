@@ -124,6 +124,44 @@ func checkAuthFolderScanner() throws {
   try expect(resultPaths == expectedPaths, "scanner should include only direct child auth files")
 }
 
+func checkAuthSwitcher() throws {
+  let root = FileManager.default.temporaryDirectory
+    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+  defer { try? FileManager.default.removeItem(at: root) }
+
+  let codexHome = root.appendingPathComponent(".codex", isDirectory: true)
+  let accountFolder = root.appendingPathComponent("accounts/account-a", isDirectory: true)
+  let currentAuth = codexHome.appendingPathComponent("auth.json")
+  let chosenAuth = accountFolder.appendingPathComponent("auth.json")
+
+  try FileManager.default.createDirectory(at: codexHome, withIntermediateDirectories: true)
+  try FileManager.default.createDirectory(at: accountFolder, withIntermediateDirectories: true)
+  try Data(#"{"current":true}"#.utf8).write(to: currentAuth)
+  try Data(#"{"chosen":true}"#.utf8).write(to: chosenAuth)
+
+  let switcher = AuthSwitcher(now: {
+    checkDate("2026-05-12T13:00:00Z")
+  })
+  let result = try switcher.switchAuth(currentAuthFile: currentAuth, chosenAuthFile: chosenAuth)
+
+  try expect(
+    result.backupFile.deletingLastPathComponent().path == accountFolder.appendingPathComponent("backups", isDirectory: true).path,
+    "auth switcher should place backups under the chosen account folder"
+  )
+  try expect(
+    result.backupFile.lastPathComponent == "auth.json-2026-05-12_18-30-00.backup",
+    "backup filename should include the local timestamp"
+  )
+  try expect(
+    try String(contentsOf: result.backupFile, encoding: .utf8) == #"{"current":true}"#,
+    "backup should contain the previous current auth file"
+  )
+  try expect(
+    try String(contentsOf: currentAuth, encoding: .utf8) == #"{"chosen":true}"#,
+    "current auth should be replaced by the chosen auth file"
+  )
+}
+
 func checkRateLimitParser() throws {
   let explicitData = Data("""
   {
@@ -220,12 +258,17 @@ func checkMenuBarPresentation() throws {
     !menuSource.contains(".disabled(store.isRefreshing)"),
     "Refresh Now should not be disabled by broad automatic refresh state"
   )
+  try expect(
+    menuSource.contains("Button(\"Make active\")"),
+    "each chosen folder row should expose a Make active button"
+  )
 }
 
 do {
   try checkUsageFormatting()
   try checkUsageStatus()
   try checkAuthFolderScanner()
+  try checkAuthSwitcher()
   try checkRateLimitParser()
   try checkMenuBarPresentation()
   print("All CodexMultiusageCore checks passed.")

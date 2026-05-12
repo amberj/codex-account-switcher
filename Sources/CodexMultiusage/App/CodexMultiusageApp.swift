@@ -8,17 +8,20 @@ struct CodexMultiusageApp: App {
   @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
   @StateObject private var store: UsageStore
   private let settingsWindowController: SettingsWindowController
+  private let authActivationWindowController: AuthActivationWindowController
 
   init() {
     let usageStore = UsageStore(startOnLoginHandler: Self.updateStartOnLogin)
-    let controller = SettingsWindowController(store: usageStore)
+    let settingsController = SettingsWindowController(store: usageStore)
+    let activationController = AuthActivationWindowController(store: usageStore)
     _store = StateObject(wrappedValue: usageStore)
-    settingsWindowController = controller
+    settingsWindowController = settingsController
+    authActivationWindowController = activationController
 
     Task { @MainActor in
       usageStore.refreshUsageStatus()
       if !usageStore.hasChosenFolder {
-        controller.show()
+        settingsController.show()
       }
     }
   }
@@ -27,6 +30,10 @@ struct CodexMultiusageApp: App {
     MenuBarExtra {
       MenuBarContentView(
         store: store,
+        makeActive: { row in
+          NSApp.keyWindow?.close()
+          authActivationWindowController.show(for: row)
+        },
         showSettings: {
           settingsWindowController.show()
         }
