@@ -50,16 +50,17 @@ func checkUsageFormatting() throws {
     fiveHourResetAt: checkDate("2026-05-12T08:54:00Z"),
     weeklyResetAt: checkDate("2026-05-18T08:50:00Z")
   )
+  let now = checkDate("2026-05-12T05:00:00Z")
   try expect(
-    usage.detailLine(for: .fiveHour, timeZone: timeZone) == "5H: 36% (Resets 14:24)",
+    usage.detailLine(for: .fiveHour, now: now, timeZone: timeZone) == "5H: 36% (Resets 14:24)",
     "5H detail line should include same-day reset time"
   )
   try expect(
-    usage.detailLine(for: .weekly, timeZone: timeZone) == "Weekly: 90% (Resets 18 May 14:20)",
+    usage.detailLine(for: .weekly, now: now, timeZone: timeZone) == "Weekly: 90% (Resets 18 May 14:20)",
     "weekly detail line should include reset date and time"
   )
   try expect(
-    UsageValues(weeklyPercentRemaining: 0).detailLine(for: .fiveHour, timeZone: timeZone) == "5H: NA (Resets NA)",
+    UsageValues(weeklyPercentRemaining: 0).detailLine(for: .fiveHour, now: now, timeZone: timeZone) == "5H: NA (Resets NA)",
     "missing 5H detail line should format percent and reset as NA"
   )
 }
@@ -96,6 +97,53 @@ func checkUsageStatus() throws {
   try expect(
     UsageValues(fiveHourPercentRemaining: nil, weeklyPercentRemaining: nil).availabilityStatus == .available,
     "all-NA quotas should not produce a warning or empty status"
+  )
+}
+
+func checkLoginRequiredStatus() throws {
+  try expect(
+    AuthUsageRow(
+      displayName: "account-a",
+      authFile: URL(fileURLWithPath: "/tmp/account-a/auth.json"),
+      errorMessage: "Invalid codex app-server response: failed to fetch codex rate limits"
+    ).requiresChatGPTLogin,
+    "accounts with failed codex rate-limit fetches should expose Login"
+  )
+
+  try expect(
+    AuthUsageRow(
+      displayName: "account-a",
+      authFile: URL(fileURLWithPath: "/tmp/account-a/auth.json"),
+      errorMessage: "Invalid codex app-server response: failed to fetch codex rate limits\nstatus: 401"
+    ).requiresChatGPTLogin,
+    "accounts with failed codex rate-limit fetches plus diagnostics should still expose Login"
+  )
+
+  try expect(
+    AuthUsageRow(
+      displayName: "account-c",
+      authFile: URL(fileURLWithPath: "/tmp/account-c/auth.json"),
+      errorMessage: "Invalid codex app-server response: codex account requires login"
+    ).requiresChatGPTLogin,
+    "accounts with any codex app-server auth error should expose Login"
+  )
+
+  try expect(
+    AuthUsageRow(
+      displayName: "account-b",
+      authFile: URL(fileURLWithPath: "/tmp/account-b/auth.json"),
+      errorMessage: "Timed out waiting for codex app-server."
+    ).requiresChatGPTLogin,
+    "accounts with any codex error should expose Login"
+  )
+
+  try expect(
+    !AuthUsageRow(
+      displayName: "account-d",
+      authFile: URL(fileURLWithPath: "/tmp/account-d/auth.json"),
+      errorMessage: "Network request failed."
+    ).requiresChatGPTLogin,
+    "accounts with unrelated non-codex errors should not expose Login"
   )
 }
 
@@ -230,6 +278,32 @@ func checkRateLimitParser() throws {
   )
 }
 
+func checkChatGPTLoginProtocol() throws {
+  let clientSourcePath = "Sources/CodexMultiusageCore/Services/CodexAppServerClient.swift"
+  let clientSource = try String(contentsOfFile: clientSourcePath, encoding: .utf8)
+
+  try expect(
+    clientSource.contains(#""method":"account/login/start""#),
+    "ChatGPT login should start through codex app-server account/login/start"
+  )
+  try expect(
+    clientSource.contains(#""params":{"type":"chatgpt"}"#),
+    "ChatGPT login should use the codex app-server managed browser OAuth flow"
+  )
+  try expect(
+    clientSource.contains(#""account/login/completed""#),
+    "ChatGPT login should listen for OAuth completion notifications"
+  )
+  try expect(
+    clientSource.contains(#"environment["CODEX_HOME"] = authFolder.path"#),
+    "ChatGPT login should write auth.json into the selected account folder"
+  )
+  try expect(
+    clientSource.contains(#"authFolder.appendingPathComponent("auth.json""#),
+    "ChatGPT login should verify auth.json was written to the selected account folder"
+  )
+}
+
 func checkMenuBarPresentation() throws {
   let appSourcePath = "Sources/CodexMultiusage/App/CodexMultiusageApp.swift"
   let appSource = try String(contentsOfFile: appSourcePath, encoding: .utf8)
@@ -262,14 +336,32 @@ func checkMenuBarPresentation() throws {
     menuSource.contains("Button(\"Make active\")"),
     "each chosen folder row should expose a Make active button"
   )
+  try expect(
+    menuSource.contains("Button(\"Re-login\")"),
+    "rows with failed ChatGPT rate-limit fetches should expose a Re-login button"
+  )
+  try expect(
+    menuSource.contains("row.requiresChatGPTLogin"),
+    "Login button should be limited to the codex rate-limit auth failure"
+  )
+  try expect(
+    menuSource.contains("login(row)"),
+    "Login button should delegate account-specific login handling"
+  )
+  try expect(
+    menuSource.contains("ErrorMessageLine(row: row, login: login)"),
+    "Login button should render beside the error message instead of competing with the row title"
+  )
 }
 
 do {
   try checkUsageFormatting()
   try checkUsageStatus()
+  try checkLoginRequiredStatus()
   try checkAuthFolderScanner()
   try checkAuthSwitcher()
   try checkRateLimitParser()
+  try checkChatGPTLoginProtocol()
   try checkMenuBarPresentation()
   print("All CodexMultiusageCore checks passed.")
 } catch {

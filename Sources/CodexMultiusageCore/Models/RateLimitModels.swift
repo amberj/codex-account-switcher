@@ -93,11 +93,17 @@ public enum UsageAvailabilityStatus: Equatable, Sendable {
 }
 
 public struct AuthUsageRow: Identifiable, Equatable, Sendable {
+  public static let chatGPTLoginRequiredErrorMessage = "Invalid codex app-server response: failed to fetch codex rate limits"
+
   public var id: String { authFile.path }
   public let displayName: String
   public let authFile: URL
   public var usage: UsageValues?
   public var errorMessage: String?
+
+  public var requiresChatGPTLogin: Bool {
+    errorMessage?.localizedCaseInsensitiveContains("codex") == true
+  }
 
   public init(displayName: String, authFile: URL, usage: UsageValues? = nil, errorMessage: String? = nil) {
     self.displayName = displayName

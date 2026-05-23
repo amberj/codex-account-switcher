@@ -5,6 +5,7 @@ import SwiftUI
 struct MenuBarContentView: View {
   @ObservedObject var store: UsageStore
   let makeActive: (AuthUsageRow) -> Void
+  let login: (AuthUsageRow) -> Void
   let showSettings: () -> Void
 
   var body: some View {
@@ -18,7 +19,7 @@ struct MenuBarContentView: View {
       } else {
         ForEach(Array(store.rows.enumerated()), id: \.element.id) { _, row in
           Divider()
-          UsageRowView(row: row, makeActive: makeActive)
+          UsageRowView(row: row, makeActive: makeActive, login: login)
         }
       }
 
@@ -100,6 +101,7 @@ private struct LastRefreshedText: View {
 private struct UsageRowView: View {
   let row: AuthUsageRow
   let makeActive: (AuthUsageRow) -> Void
+  let login: (AuthUsageRow) -> Void
 
   var body: some View {
     let usage = row.usage ?? UsageValues()
@@ -123,11 +125,31 @@ private struct UsageRowView: View {
 
       UsageDetailLines(usage: usage)
 
-      if let errorMessage = row.errorMessage {
+      ErrorMessageLine(row: row, login: login)
+    }
+  }
+}
+
+private struct ErrorMessageLine: View {
+  let row: AuthUsageRow
+  let login: (AuthUsageRow) -> Void
+
+  var body: some View {
+    if let errorMessage = row.errorMessage {
+      HStack(alignment: .firstTextBaseline, spacing: 8) {
         Text(errorMessage)
           .font(.system(size: 12))
           .foregroundStyle(.red)
           .lineLimit(2)
+          .frame(maxWidth: .infinity, alignment: .leading)
+
+        if row.requiresChatGPTLogin {
+          Button("Re-login") {
+            login(row)
+          }
+          .font(.system(size: 12))
+          .layoutPriority(1)
+        }
       }
     }
   }

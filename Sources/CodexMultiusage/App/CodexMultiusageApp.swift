@@ -9,14 +9,17 @@ struct CodexMultiusageApp: App {
   @StateObject private var store: UsageStore
   private let settingsWindowController: SettingsWindowController
   private let authActivationWindowController: AuthActivationWindowController
+  private let authLoginWindowController: AuthLoginWindowController
 
   init() {
     let usageStore = UsageStore(startOnLoginHandler: Self.updateStartOnLogin)
     let settingsController = SettingsWindowController(store: usageStore)
     let activationController = AuthActivationWindowController(store: usageStore)
+    let loginController = AuthLoginWindowController(store: usageStore)
     _store = StateObject(wrappedValue: usageStore)
     settingsWindowController = settingsController
     authActivationWindowController = activationController
+    authLoginWindowController = loginController
 
     Task { @MainActor in
       usageStore.refreshUsageStatus()
@@ -33,6 +36,9 @@ struct CodexMultiusageApp: App {
         makeActive: { row in
           NSApp.keyWindow?.close()
           authActivationWindowController.show(for: row)
+        },
+        login: { row in
+          authLoginWindowController.show(for: row)
         },
         showSettings: {
           settingsWindowController.show()

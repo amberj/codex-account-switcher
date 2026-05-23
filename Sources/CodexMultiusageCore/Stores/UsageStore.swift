@@ -94,6 +94,10 @@ public final class UsageStore: ObservableObject {
     return result
   }
 
+  public func startChatGPTLogin(for row: AuthUsageRow) async throws -> CodexChatGPTLoginSession {
+    try await client.startChatGPTLogin(authFolder: row.authFile.deletingLastPathComponent())
+  }
+
   private func startRefresh(disablesRefreshButtonDuringFolderCheck: Bool) {
     refreshTask?.cancel()
     refreshTask = Task {

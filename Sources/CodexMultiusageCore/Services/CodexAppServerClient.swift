@@ -6,6 +6,7 @@ public enum CodexAppServerClientError: Error, LocalizedError {
   case timedOut
   case emptyResponse
   case invalidResponse(String)
+  case loginFailed(String)
 
   public var errorDescription: String? {
     switch self {
@@ -19,7 +20,117 @@ public enum CodexAppServerClientError: Error, LocalizedError {
       return "Codex app-server returned no response."
     case .invalidResponse(let message):
       return "Invalid codex app-server response: \(message)"
+    case .loginFailed(let message):
+      return "ChatGPT login failed: \(message)"
     }
+  }
+}
+
+public final class CodexChatGPTLoginSession: @unchecked Sendable {
+  public let authURL: URL
+  public let loginId: String
+
+  private let process: Process
+  private let stdin: Pipe
+  private let stdout: Pipe
+  private let stderr: Pipe
+  private let authFile: URL
+  private let stateQueue = DispatchQueue(label: "CodexChatGPTLoginSession.state")
+  private var completion: Result<Void, Error>?
+  private var continuation: CheckedContinuation<Void, Error>?
+  private var isCleanedUp = false
+
+  fileprivate init(authURL: URL, loginId: String, process: Process, stdin: Pipe, stdout: Pipe, stderr: Pipe, authFile: URL) {
+    self.authURL = authURL
+    self.loginId = loginId
+    self.process = process
+    self.stdin = stdin
+    self.stdout = stdout
+    self.stderr = stderr
+    self.authFile = authFile
+  }
+
+  deinit {
+    stateQueue.sync {
+      cleanupLocked()
+    }
+  }
+
+  public func waitForCompletion() async throws {
+    try await withCheckedThrowingContinuation { continuation in
+      stateQueue.async {
+        if let completion = self.completion {
+          continuation.resume(with: completion)
+        } else if self.continuation == nil {
+          self.continuation = continuation
+        } else {
+          continuation.resume(throwing: CodexAppServerClientError.loginFailed("Login is already being awaited."))
+        }
+      }
+    }
+  }
+
+  public func cancel() {
+    stateQueue.async {
+      guard self.completion == nil else {
+        return
+      }
+
+      self.writeJSON([
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "account/login/cancel",
+        "params": ["loginId": self.loginId]
+      ])
+      self.finishLocked(.failure(CodexAppServerClientError.loginFailed("Login was cancelled.")))
+    }
+  }
+
+  fileprivate func finish(with result: Result<Void, Error>) {
+    stateQueue.async {
+      self.finishLocked(result)
+    }
+  }
+
+  private func finishLocked(_ result: Result<Void, Error>) {
+    guard completion == nil else {
+      return
+    }
+
+    let finalResult: Result<Void, Error>
+    if case .success = result, !FileManager.default.fileExists(atPath: authFile.path) {
+      finalResult = .failure(CodexAppServerClientError.invalidResponse("login completed but auth.json was not written."))
+    } else {
+      finalResult = result
+    }
+
+    completion = finalResult
+    continuation?.resume(with: finalResult)
+    continuation = nil
+    cleanupLocked()
+  }
+
+  private func writeJSON(_ object: [String: Any]) {
+    guard let data = try? JSONSerialization.data(withJSONObject: object) else {
+      return
+    }
+
+    stdin.fileHandleForWriting.write(data + Data("\n".utf8))
+  }
+
+  private func cleanupLocked() {
+    guard !isCleanedUp else {
+      return
+    }
+
+    isCleanedUp = true
+    stdout.fileHandleForReading.readabilityHandler = nil
+    stderr.fileHandleForReading.readabilityHandler = nil
+    try? stdin.fileHandleForWriting.close()
+    if process.isRunning {
+      process.terminate()
+    }
+    process.waitUntilExit()
   }
 }
 
@@ -37,6 +148,201 @@ public struct CodexAppServerClient: Sendable {
       try readUsageSynchronously(authFile: authFile, parser: parser, timeout: timeout)
     }.value
   }
+
+  public func startChatGPTLogin(authFolder: URL) async throws -> CodexChatGPTLoginSession {
+    try await Task.detached(priority: .userInitiated) {
+      try startChatGPTLoginSynchronously(authFolder: authFolder, timeout: timeout)
+    }.value
+  }
+}
+
+private func startChatGPTLoginSynchronously(authFolder: URL, timeout: TimeInterval) throws -> CodexChatGPTLoginSession {
+  let fileManager = FileManager.default
+  try fileManager.createDirectory(at: authFolder, withIntermediateDirectories: true)
+  try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: authFolder.path)
+
+  let process = Process()
+  process.executableURL = try resolveCodexExecutable()
+  process.arguments = ["app-server", "--listen", "stdio://"]
+  var environment = ProcessInfo.processInfo.environment
+  environment["CODEX_HOME"] = authFolder.path
+  environment["PATH"] = codexSearchPaths().joined(separator: ":")
+  process.environment = environment
+
+  let stdin = Pipe()
+  let stdout = Pipe()
+  let stderr = Pipe()
+  process.standardInput = stdin
+  process.standardOutput = stdout
+  process.standardError = stderr
+
+  let outputQueue = DispatchQueue(label: "CodexAppServerClient.login.output")
+  var stdoutData = Data()
+  var stderrData = Data()
+  var initializeResponseData: Data?
+  var loginStartResponseData: Data?
+  var loginSession: CodexChatGPTLoginSession?
+  let initializeSemaphore = DispatchSemaphore(value: 0)
+  let loginStartSemaphore = DispatchSemaphore(value: 0)
+
+  process.terminationHandler = { _ in
+    initializeSemaphore.signal()
+    loginStartSemaphore.signal()
+    outputQueue.async {
+      let message = processOutputMessage(
+        stdoutData: stdoutData,
+        stderrData: stderrData,
+        fallback: "codex app-server exited before login completed."
+      )
+      loginSession?.finish(with: .failure(CodexAppServerClientError.invalidResponse(message)))
+    }
+  }
+
+  stdout.fileHandleForReading.readabilityHandler = { handle in
+    let data = handle.availableData
+    guard !data.isEmpty else {
+      return
+    }
+
+    outputQueue.sync {
+      stdoutData.append(data)
+      for lineData in jsonLines(from: stdoutData) {
+        guard let response = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any] else {
+          continue
+        }
+
+        if let id = response["id"] as? NSNumber {
+          switch id.intValue {
+          case 1:
+            initializeResponseData = lineData
+            initializeSemaphore.signal()
+          case 2:
+            loginStartResponseData = lineData
+            loginStartSemaphore.signal()
+          default:
+            continue
+          }
+        } else if let method = response["method"] as? String,
+                  method == "account/login/completed",
+                  let params = response["params"] as? [String: Any] {
+          let completedLoginId = params["loginId"] as? String
+          guard completedLoginId == nil || completedLoginId == loginSession?.loginId else {
+            continue
+          }
+
+          if params["success"] as? Bool == true {
+            loginSession?.finish(with: .success(()))
+          } else {
+            let message = (params["error"] as? String) ?? "The ChatGPT OAuth flow did not complete."
+            loginSession?.finish(with: .failure(CodexAppServerClientError.loginFailed(message)))
+          }
+        }
+      }
+    }
+  }
+
+  stderr.fileHandleForReading.readabilityHandler = { handle in
+    let data = handle.availableData
+    guard !data.isEmpty else {
+      return
+    }
+
+    outputQueue.sync {
+      stderrData.append(data)
+    }
+  }
+
+  do {
+    try process.run()
+  } catch {
+    throw CodexAppServerClientError.launchFailed(error.localizedDescription)
+  }
+
+  let initializeRequest = #"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"clientInfo":{"name":"codex_multiusage","title":"Codex Multiusage","version":"0.1.0"},"capabilities":{"experimentalApi":true}}}"# + "\n"
+  stdin.fileHandleForWriting.write(Data(initializeRequest.utf8))
+
+  let initializeDeadline = DispatchTime.now() + timeout
+  guard initializeSemaphore.wait(timeout: initializeDeadline) == .success else {
+    cleanup(process: process, stdout: stdout, stderr: stderr)
+    throw CodexAppServerClientError.timedOut
+  }
+
+  if outputQueue.sync(execute: { initializeResponseData == nil }) {
+    let message = outputQueue.sync {
+      processOutputMessage(
+        stdoutData: stdoutData,
+        stderrData: stderrData,
+        fallback: "codex app-server exited before responding to initialize."
+      )
+    }
+    cleanup(process: process, stdout: stdout, stderr: stderr)
+    throw CodexAppServerClientError.invalidResponse(message)
+  }
+
+  let followupRequest = [
+    #"{"jsonrpc":"2.0","method":"initialized","params":{}}"#,
+    #"{"jsonrpc":"2.0","id":2,"method":"account/login/start","params":{"type":"chatgpt"}}"#
+  ].joined(separator: "\n") + "\n"
+  stdin.fileHandleForWriting.write(Data(followupRequest.utf8))
+
+  let loginStartDeadline = DispatchTime.now() + timeout
+  guard loginStartSemaphore.wait(timeout: loginStartDeadline) == .success else {
+    cleanup(process: process, stdout: stdout, stderr: stderr)
+    throw CodexAppServerClientError.timedOut
+  }
+
+  let finalInitializeResponse = outputQueue.sync { initializeResponseData }
+  let finalLoginStartResponse = outputQueue.sync { loginStartResponseData }
+
+  if let finalInitializeResponse,
+     let response = try? JSONSerialization.jsonObject(with: finalInitializeResponse) as? [String: Any],
+     let error = response["error"] as? [String: Any] {
+    let message = (error["message"] as? String) ?? String(describing: error)
+    cleanup(process: process, stdout: stdout, stderr: stderr)
+    throw CodexAppServerClientError.invalidResponse(message)
+  }
+
+  guard let finalLoginStartResponse,
+        let response = try? JSONSerialization.jsonObject(with: finalLoginStartResponse) as? [String: Any] else {
+    let message = outputQueue.sync {
+      processOutputMessage(
+        stdoutData: stdoutData,
+        stderrData: stderrData,
+        fallback: "codex app-server exited before returning ChatGPT login details."
+      )
+    }
+    cleanup(process: process, stdout: stdout, stderr: stderr)
+    throw CodexAppServerClientError.invalidResponse(message)
+  }
+
+  if let error = response["error"] as? [String: Any] {
+    let message = (error["message"] as? String) ?? String(describing: error)
+    cleanup(process: process, stdout: stdout, stderr: stderr)
+    throw CodexAppServerClientError.invalidResponse(message)
+  }
+
+  guard let result = response["result"] as? [String: Any],
+        result["type"] as? String == "chatgpt",
+        let loginId = result["loginId"] as? String,
+        let authURLString = result["authUrl"] as? String,
+        let authURL = URL(string: authURLString) else {
+    cleanup(process: process, stdout: stdout, stderr: stderr)
+    throw CodexAppServerClientError.invalidResponse("codex app-server did not return a ChatGPT authUrl.")
+  }
+
+  let session = CodexChatGPTLoginSession(
+    authURL: authURL,
+    loginId: loginId,
+    process: process,
+    stdin: stdin,
+    stdout: stdout,
+    stderr: stderr,
+    authFile: authFolder.appendingPathComponent("auth.json", isDirectory: false)
+  )
+  outputQueue.sync {
+    loginSession = session
+  }
+  return session
 }
 
 private func readUsageSynchronously(authFile: URL, parser: RateLimitParser, timeout: TimeInterval) throws -> UsageValues {
